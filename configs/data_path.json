@@ -1,0 +1,21 @@
+{
+  "sec_src": "data/secs.jsonl",
+  "train_src": "data/train.jsonl",
+  "dev_src": "data/dev.jsonl",
+  "test_src": "data/test.jsonl",
+  "infer_src": null,
+  
+  "type_map": "data/type_map.json",
+  "label_tree": "data/label_tree.json",
+  "citation_network": "data/citation_network.json",
+  "schemas": "data/schemas.json",
+  "sent2vec_model": "data/ils2v.bin",
+  
+  "model_load": null,
+  "metrics_load": null,
+  "model_dump": "output/best_model.pt",
+  "dev_metrics_dump": "output/dev_metrics.json",
+  "test_metrics_dump": "output/test_metrics.json",
+  "infer_trg": "output/predictions.jsonl",
+  "vocab_dump": "output/vocab.json"
+}

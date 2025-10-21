@@ -1,0 +1,37 @@
+{
+  "seed": 42,
+  "do_train_dev": true,
+  "do_test": false,
+  "do_infer": false,
+  
+  "use_trie": true,
+  "use_orwell": true,
+  "use_kdtree": false,
+  "k_neighbors": 10,
+  
+  "vocab_limit": 10000,
+  "vocab_thresh": 3,
+  "weight_scheme": "tws",
+  "tws_thresh": 10.0,
+  
+  "train_bs": 8,
+  "dev_bs": 16,
+  "test_bs": 16,
+  "infer_bs": 16,
+  
+  "max_segments": 50,
+  "max_segment_size": 100,
+  "num_mpath_samples": 8,
+  "hidden_size": 200,
+  
+  "opt_lr": 0.001,
+  "opt_wt_decay": 0.00001,
+  "sch_factor": 0.5,
+  "sch_patience": 3,
+  
+  "num_epoch": 30,
+  "pthresh": 0.65,
+  "thetas": [1.0, 2.0, 3.0],
+  "lambdas": [0.25, 0.75],
+  "dropout": 0.5
+}
