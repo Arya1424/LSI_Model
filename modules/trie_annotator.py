@@ -1,30 +1,22 @@
 """
 Trie-based Legal Phrase Annotator
-Purpose: Normalize and tag known legal phrases or IPC section names
+Purpose: Normalize and tag known legal phrases or IPC section names.
 """
 import pygtrie
 import re
+from typing import Dict, List, Union
 
 class TrieAnnotator:
-    def __init__(self, phrases_dict=None):
-        """
-        Initialize Trie with legal phrases
-        Args:
-            phrases_dict: dict mapping phrases to tags, e.g., {'attempt to murder': '<IPC_307>'}
-        """
+    def __init__(self, phrases_dict: Dict[str, str] = None):
+        """Initialize Trie with legal phrases."""
         self.trie = pygtrie.CharTrie()
-        
         if phrases_dict is None:
-            # Default IPC phrases
             phrases_dict = self._build_default_ipc_phrases()
-        
-        # Build the trie
         for phrase, tag in phrases_dict.items():
-            self.trie[phrase.lower()] = tag
+            self.trie[phrase.lower()] = tag.upper() 
     
-    def _build_default_ipc_phrases(self):
+    def _build_default_ipc_phrases(self) -> Dict[str, str]:
         """Build default IPC section phrases"""
-        # Common IPC sections and their descriptions
         return {
             'attempt to murder': '<IPC_307>',
             'culpable homicide': '<IPC_299>',
@@ -52,88 +44,36 @@ class TrieAnnotator:
             'criminal breach of trust': '<IPC_405>',
         }
     
-    def annotate_text(self, text):
-        """
-        Annotate text by replacing legal phrases with tags
-        Args:
-            text: string or list of strings
-        Returns:
-            annotated text in same format as input
-        """
-        if isinstance(text, list):
-            return [self._annotate_single(t) for t in text]
-        return self._annotate_single(text)
-    
-    def _annotate_single(self, text):
-        """Annotate a single text string"""
-        if not text:
-            return text
+    def annotate_text(self, text: str) -> str:
+        """Annotate a single text string by replacing legal phrases with tags."""
+        if not text: return text
         
         text_lower = text.lower()
-        result = text
+        words = text_lower.split()
         replacements = []
         
-        # Find all matches
-        words = text_lower.split()
         for i in range(len(words)):
-            for j in range(i+1, min(i+6, len(words)+1)):  # Max 5-word phrases
+            for j in range(i + 1, min(i + 6, len(words) + 1)):
                 phrase = ' '.join(words[i:j])
-                if phrase in self.trie:
-                    tag = self.trie[phrase]
-                    # Store (start_pos, end_pos, original, tag)
-                    start = text_lower.find(phrase)
-                    if start != -1:
-                        replacements.append((start, start + len(phrase), phrase, tag))
+                match = self.trie.longest_prefix(phrase)
+                if match and match.key == phrase:
+                    replacements.append((i, len(match.key.split()), match.value))
+
+        replacements.sort(key=lambda x: (x[0], -x[1]))
         
-        # Sort by position and apply replacements (longest first to avoid conflicts)
-        replacements.sort(key=lambda x: (x[0], -(x[1]-x[0])))
+        new_words = words[:]
+        used_token_indices = set()
         
-        # Apply replacements avoiding overlaps
-        used_ranges = []
-        final_replacements = []
-        
-        for start, end, orig, tag in replacements:
-            # Check for overlap
-            overlap = False
-            for used_start, used_end in used_ranges:
-                if not (end <= used_start or start >= used_end):
-                    overlap = True
-                    break
+        for start_idx, length, tag in replacements:
+            end_idx = start_idx + length
+            is_overlap = any(i in used_token_indices for i in range(start_idx, end_idx))
             
-            if not overlap:
-                final_replacements.append((start, end, orig, tag))
-                used_ranges.append((start, end))
-        
-        # Apply replacements from end to start
-        final_replacements.sort(key=lambda x: -x[0])
-        for start, end, orig, tag in final_replacements:
-            # Find exact match preserving case
-            pattern = re.compile(re.escape(orig), re.IGNORECASE)
-            result = pattern.sub(tag, result, count=1)
-        
-        return result
-    
-    def add_phrases(self, phrases_dict):
-        """Add more phrases to the trie"""
-        for phrase, tag in phrases_dict.items():
-            self.trie[phrase.lower()] = tag
+            if not is_overlap:
+                new_words[start_idx] = tag 
+                for i in range(start_idx + 1, end_idx):
+                    new_words[i] = ''
+                for i in range(start_idx, end_idx):
+                    used_token_indices.add(i)
 
-
-if __name__ == '__main__':
-    # Test the annotator
-    print("Testing Trie Annotator...")
-    
-    trie = TrieAnnotator()
-    
-    test_cases = [
-        "The accused attempted to murder the victim",
-        "Case of culpable homicide and theft",
-        "Charged with criminal conspiracy and cheating"
-    ]
-    
-    for test in test_cases:
-        annotated = trie.annotate_text(test)
-        print(f"\nOriginal:  {test}")
-        print(f"Annotated: {annotated}")
-    
-    print("\n✓ Trie Annotator working correctly!")
+        annotated_text = ' '.join(filter(None, new_words))
+        return annotated_text
