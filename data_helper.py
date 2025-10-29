@@ -2,13 +2,14 @@ import torch
 import numpy as np
 import string
 import copy
-import multiprocessing as mp
 from tqdm import tqdm
 import json
 import pickle as pkl
 import sys
+import os 
+import random 
 
-# Append modules path and import new features
+# Ensure modules directory is on path
 sys.path.append('./modules') 
 from trie_annotator import TrieAnnotator
 from orwell_simplifier import OrwellSimplifier
@@ -19,9 +20,8 @@ class LSIDataset(torch.utils.data.Dataset):
         
         self.annotated = False
         self.sent_vectorized = False
-        self.has_orwell_features = False # NEW FLAG
+        self.has_orwell_features = False
         
-        # Initialize the new processors
         self.trie_annotator = TrieAnnotator()
         self.orwell_simplifier = OrwellSimplifier()
         
@@ -38,7 +38,7 @@ class LSIDataset(torch.utils.data.Dataset):
             with open(jsonl_file) as fr:
                 for line in tqdm(fr, desc="Loading data from file"):
                     doc = json.loads(line)
-                    text = [sent for sent in doc['text']] # Keep as list of strings initially
+                    text = [sent for sent in doc['text']]
                     newdoc = {'id': doc['id'], 'text': text}
                     if 'labels' in doc:
                         self.annotated = True
@@ -53,6 +53,8 @@ class LSIDataset(torch.utils.data.Dataset):
         return self.dataset[index]
     
     def save_data(self, data_file):
+        os.makedirs(os.path.dirname(data_file), exist_ok=True) 
+        
         with open(data_file, 'wb') as fw:
             pkl.dump(self, fw)
             
@@ -60,26 +62,22 @@ class LSIDataset(torch.utils.data.Dataset):
         with open(data_file, 'rb') as fr:
             return pkl.load(fr)
         
-    # Apply Trie, Orwell, and then standard preprocessing
     def preprocess(self, use_trie=False, use_orwell=False):
         
         for i, instance in enumerate(tqdm(self.dataset, desc="1. Trie/Orwell Preprocessing")):
             
             text_str = ' '.join(instance['text'])
             
-            # 1. Extract Orwell Features
             if use_orwell:
                 instance['orwell_features'] = self.orwell_simplifier.extract_features(text_str)
             else:
                 instance['orwell_features'] = [0.0, 0.0, 0.0]
 
-            # 2. Trie Annotation
             if use_trie:
                 annotated_text = self.trie_annotator.annotate_text(text_str)
             else:
                 annotated_text = text_str
             
-            # Re-split the annotated text by space
             instance['text'] = np.array([s.strip() for s in annotated_text.split() if s.strip()])
 
 
@@ -93,20 +91,18 @@ class LSIDataset(torch.utils.data.Dataset):
                      if len(ppsent.split()) > 1:
                         text.append(ppsent)
                 else:
-                    text.append(sent) # Keep as raw string for Sent2Vec
+                    text.append(sent)
             instance['text'] = np.array(text)
 
 
-    # break each sentence string into word tokens (Only used if NOT Sent2Vec)
     def tokenize(self):
         for i, instance in enumerate(tqdm(self.dataset, desc="Tokenizing")):
             text = []
             for j, sent in enumerate(instance['text']):
                 toksent = np.array(sent.strip().split())
                 text.append(toksent)
-            instance['text'] = np.array(text, dtype=object)
+            instance['text'] = np.array(toksent, dtype=object) 
     
-    # generate a vector for each sentence using Sent2Vec
     def sent_vectorize(self, sent2vec_model):      
         for i, instance in enumerate(tqdm(self.dataset, desc="Embedding sentences")):
             if sent2vec_model is not None:
@@ -118,14 +114,12 @@ class LSIDataset(torch.utils.data.Dataset):
         self.sent_vectorized = True
 
 
-# unified code for generating mini batches of data for both facts and sections during train / dev / test / inference
 class MiniBatch:
     def __init__(self, examples, vocab=None, label_vocab=None, schemas=None, type_map=None, node_vocab=None, edge_vocab=None, adjacency=None, hidden_size=200, max_segments=4, max_segment_size=8, num_mpath_samples=2):
         self.sent_vectorized = True if vocab is None else False
         self.annotated = True if label_vocab is not None else False
         self.sample_metapaths = True if schemas is not None else False
         
-        # NEW: Check and initialize Orwell features
         self.has_orwell_features = len(examples) > 0 and 'orwell_features' in examples[0]
         if self.has_orwell_features:
             self.orwell_features = torch.zeros(len(examples), 3, dtype=torch.float) 
@@ -149,22 +143,20 @@ class MiniBatch:
             self.adjacency = adjacency
             self.num_mpath_samples = num_mpath_samples
         
-        # Determine maximum sequence lengths
         max_len = max([len(d['text']) for d in examples])
         max_segments = min(self.max_segments, max_len)
         
-        # expected shape of text tensors
         if not self.sent_vectorized:
             max_segment_size = max([len(s) for d in examples for s in d['text']]) if max_len > 0 else 1 
             max_segment_size = min(self.max_segment_size, max_segment_size)
-            self.tokens = torch.zeros(len(examples), max_segments, max_segment_size, dtype=torch.long) # [D, S, W]
+            self.tokens = torch.zeros(len(examples), max_segments, max_segment_size, dtype=torch.long)
         else:
-            self.doc_inputs = torch.zeros(len(examples), max_segments, self.sent_hidden_size) # [D, S, H]
+            self.doc_inputs = torch.zeros(len(examples), max_segments, self.sent_hidden_size)
         
         self.example_ids = []
         
         if self.annotated:
-            self.labels = torch.zeros(len(examples), len(self.label_vocab)) # [D, C]
+            self.labels = torch.zeros(len(examples), len(self.label_vocab))
         
         for i, instance in enumerate(examples):
             if not self.sent_vectorized:
@@ -176,30 +168,71 @@ class MiniBatch:
             self.example_ids.append(instance['id'])
             
             if self.annotated:
-                label_list = torch.from_numpy(np.array([self.label_vocab[l] for l in instance['labels']]))
+                label_indices = [self.label_vocab[l] for l in instance['labels']]
+                label_list = torch.as_tensor(label_indices, dtype=torch.long)
                 self.labels[i].scatter_(0, label_list, 1.) 
             
-            if self.has_orwell_features: # NEW: Fill Orwell features
+            if self.has_orwell_features:
                 self.orwell_features[i] = torch.tensor(instance['orwell_features'], dtype=torch.float)
                 
         if not self.sent_vectorized:
-            self.mask = (self.tokens != 0).float() # [D, S, W]
+            self.mask = (self.tokens != 0).float()
         else:
             self.mask = (self.doc_inputs.abs().sum(dim=2) != 0).float() 
                 
         if self.sample_metapaths:
             trg_node_tokens = torch.tensor([self.node_vocab[self.type_map[x]][x] for x in self.example_ids])
-            self.node_tokens, self.edge_tokens = self.generate_metapaths(trg_node_tokens, self.schemas, self.adjacency, self.edge_vocab, num_samples=self.num_mpath_samples) # N * [M, D, L+1], N * [M, D, L]
+            self.node_tokens, self.edge_tokens = self.generate_metapaths(trg_node_tokens, self.schemas, self.adjacency, self.edge_vocab, num_samples=self.num_mpath_samples)
     
+    # Manual implementation of neighbor sampling (replaces torch_sparse.sample())
     def generate_metapaths(self, indices, schemas, adjacency, edge_vocab, num_samples=2): 
-        indices = indices.repeat(num_samples) 
+        
+        indices = indices.repeat(num_samples) # [M*D,]
         tokens, edge_tokens = [], []
         
         for i in range(len(schemas)):
             ins_tokens, ins_edge_tokens = [indices], []
+            
             for keys in schemas[i]:
-                neighbours = adjacency[keys].sample(num_neighbors=1, subset=ins_tokens[-1]).squeeze(1) 
-                relations = torch.full(neighbours.shape, edge_vocab[keys[1]], dtype=torch.long) 
+                current_indices = ins_tokens[-1].tolist()
+                neighbours_list = []
+                
+                # Perform manual random neighbor sampling for each node index
+                for index in current_indices:
+                    node_type = keys[0]
+                    
+                    # 1. Reverse Lookup (Find node name from token ID)
+                    node_name = next((name for name, idx in self.node_vocab[node_type].items() if idx == index), None)
+                    
+                    if node_name is None:
+                        # If node ID is corrupted, sample identity
+                        sampled_index = index
+                    else:
+                        # 2. Get Neighbors from Adjacency List
+                        possible_neighbors = adjacency.get(keys, {}).get(node_name, [])
+                        
+                        if possible_neighbors:
+                            # 3. Sample Neighbor
+                            sampled_name = random.choice(possible_neighbors)
+                            # 4. Forward Lookup (Get new token ID)
+                            sampled_index = self.node_vocab[keys[2]][sampled_name]
+                        else:
+                            # If no neighbors, sample the node itself (identity)
+                            sampled_index = index 
+
+                    neighbours_list.append(sampled_index)
+                
+                neighbours = torch.tensor(neighbours_list, dtype=torch.long) # [M*D,]
+                
+                # --- FIX: CLAMP INDICES TO PREVENT CUDA CRASH (device-side assert) ---
+                target_node_type = keys[2]
+                max_valid_index = len(self.node_vocab[target_node_type]) - 1
+                
+                # Clamp all indices to ensure they are within the [0, max_valid_index] range
+                neighbours = torch.clamp(neighbours, min=0, max=max_valid_index) 
+                # --------------------------------------------------------------------
+                
+                relations = torch.full(neighbours.shape, edge_vocab[keys[1]], dtype=torch.long) # [M*D,]
                 
                 ins_tokens.append(neighbours)
                 ins_edge_tokens.append(relations)
@@ -215,7 +248,6 @@ class MiniBatch:
         
         return tokens, edge_tokens                    
     
-    # automatic memory pinning for faster cpu to cuda transfer
     def pin_memory(self):
         if not self.sent_vectorized:
             self.tokens.pin_memory()
@@ -232,21 +264,23 @@ class MiniBatch:
                 self.edge_tokens[i].pin_memory()
         return self
     
-    # transfer pinned cpu tensors to cuda
-    def cuda(self, dev='cuda'):
+    def to_device(self, dev):
         if not self.sent_vectorized:
-            self.tokens = self.tokens.cuda(dev, non_blocking=True)
+            self.tokens = self.tokens.to(dev, non_blocking=True)
         else:
-            self.doc_inputs = self.doc_inputs.cuda(dev, non_blocking=True)
-        self.mask = self.mask.cuda(dev, non_blocking=True)
+            self.doc_inputs = self.doc_inputs.to(dev, non_blocking=True)
+        
+        self.mask = self.mask.to(dev, non_blocking=True)
+        
         if self.annotated:
-            self.labels = self.labels.cuda(dev, non_blocking=True)
+            self.labels = self.labels.to(dev, non_blocking=True)
         if self.has_orwell_features:
-            self.orwell_features = self.orwell_features.cuda(dev, non_blocking=True)
+            self.orwell_features = self.orwell_features.to(dev, non_blocking=True)
+            
         if self.sample_metapaths:
             for i in range(len(self.node_tokens)):
-                self.node_tokens[i] = self.node_tokens[i].cuda(dev, non_blocking=True)
-                self.edge_tokens[i] = self.edge_tokens[i].cuda(dev, non_blocking=True)
+                self.node_tokens[i] = self.node_tokens[i].to(dev, non_blocking=True)
+                self.edge_tokens[i] = self.edge_tokens[i].to(dev, non_blocking=True)
         return self
 
 def collate_func(examples, **kwargs):
