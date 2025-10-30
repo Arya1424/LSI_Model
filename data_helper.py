@@ -63,54 +63,114 @@ class LSIDataset(torch.utils.data.Dataset):
             return pkl.load(fr)
         
     def preprocess(self, use_trie=False, use_orwell=False):
+        """Fixed preprocessing that preserves sentence structure"""
         
         for i, instance in enumerate(tqdm(self.dataset, desc="1. Trie/Orwell Preprocessing")):
+            # instance['text'] is already a list of sentences from JSONL loading
+            sentences = instance['text']
             
-            text_str = ' '.join(instance['text'])
+            # Ensure it's a list of strings
+            if isinstance(sentences, np.ndarray):
+                sentences = sentences.tolist()
+            if not isinstance(sentences, list):
+                sentences = [str(sentences)]
             
+            # Join for Orwell feature extraction (needs full document)
+            full_text = ' '.join(str(s) for s in sentences)
+            
+            # Extract Orwell features from the full text
             if use_orwell:
-                instance['orwell_features'] = self.orwell_simplifier.extract_features(text_str)
+                instance['orwell_features'] = self.orwell_simplifier.extract_features(full_text)
             else:
                 instance['orwell_features'] = [0.0, 0.0, 0.0]
-
-            if use_trie:
-                annotated_text = self.trie_annotator.annotate_text(text_str)
-            else:
-                annotated_text = text_str
             
-            instance['text'] = np.array([s.strip() for s in annotated_text.split() if s.strip()])
-
-
+            # Apply Trie annotation to EACH SENTENCE individually
+            if use_trie:
+                annotated_sentences = []
+                for sent in sentences:
+                    annotated_sent = self.trie_annotator.annotate_text(str(sent))
+                    if annotated_sent.strip():  # Only add non-empty sentences
+                        annotated_sentences.append(annotated_sent)
+            else:
+                annotated_sentences = [str(s) for s in sentences if str(s).strip()]
+            
+            # Store as list of sentences (NOT words!)
+            instance['text'] = annotated_sentences
+        
         self.has_orwell_features = use_orwell
-
+        
+        # Standard preprocessing (lowercase, remove punctuation)
         for i, instance in enumerate(tqdm(self.dataset, desc="2. Standard Preprocessing")):
-            text = []
-            for j, sent in enumerate(instance['text']):
+            processed_sentences = []
+            
+            for sent in instance['text']:
                 if not self.sent_vectorized:
-                     ppsent = sent.strip().lower().translate(str.maketrans('', '', string.punctuation))
-                     if len(ppsent.split()) > 1:
-                        text.append(ppsent)
+                    # Clean the sentence: lowercase and remove punctuation
+                    cleaned = sent.strip().lower()
+                    # Remove punctuation but keep spaces
+                    cleaned = cleaned.translate(str.maketrans('', '', string.punctuation))
+                    # Only keep sentences with at least 1 word
+                    if len(cleaned.split()) >= 1:
+                        processed_sentences.append(cleaned)
                 else:
-                    text.append(sent)
-            instance['text'] = np.array(text)
+                    # Already vectorized, just pass through
+                    processed_sentences.append(sent)
+            
+            # Ensure we have at least one sentence (fallback)
+            if len(processed_sentences) == 0:
+                processed_sentences = ['unknown document']
+            
+            instance['text'] = processed_sentences  # Keep as Python list for now
 
 
     def tokenize(self):
+        """Fixed tokenization"""
         for i, instance in enumerate(tqdm(self.dataset, desc="Tokenizing")):
             text = []
             for j, sent in enumerate(instance['text']):
                 toksent = np.array(sent.strip().split())
                 text.append(toksent)
-            instance['text'] = np.array(toksent, dtype=object) 
+            instance['text'] = np.array(text, dtype=object)  # Keep as array of arrays
     
-    def sent_vectorize(self, sent2vec_model):      
+    def sent_vectorize(self, sent2vec_model):
+        """Convert sentences to vectors using sent2vec"""
         for i, instance in enumerate(tqdm(self.dataset, desc="Embedding sentences")):
             if sent2vec_model is not None:
-                esents = sent2vec_model.embed_sentences(instance['text'].tolist())
-                valid_rows = np.where(esents.sum(axis=1) != 0)[0]
-                instance['text'] = esents[valid_rows]
+                # Ensure text is a list of strings
+                sentences = instance['text']
+                if isinstance(sentences, np.ndarray):
+                    sentences = sentences.tolist()
+                
+                # Convert to list of strings
+                sentences = [str(s) for s in sentences]
+                
+                # Embed sentences
+                try:
+                    esents = sent2vec_model.embed_sentences(sentences)
+                    
+                    # Check if we got valid embeddings
+                    if esents.shape[0] == 0 or esents.shape[1] == 0:
+                        print(f"WARNING: Zero embeddings for document {instance.get('id', i)}")
+                        instance['text'] = np.zeros((1, 200))  # At least keep 1 dummy vector
+                    else:
+                        # Only filter out completely zero vectors (rare)
+                        # But be more lenient - keep vectors with small values too
+                        valid_rows = np.where(np.abs(esents).sum(axis=1) > 1e-6)[0]
+                        
+                        if len(valid_rows) == 0:
+                            # If all vectors are zero, keep the first one anyway
+                            print(f"WARNING: All zero vectors for document {instance.get('id', i)}, keeping first vector")
+                            instance['text'] = esents[:1]
+                        else:
+                            instance['text'] = esents[valid_rows]
+                except Exception as e:
+                    print(f"ERROR embedding document {instance.get('id', i)}: {e}")
+                    instance['text'] = np.zeros((1, 200))
             else:
-                instance['text'] = np.zeros((0, 200))
+                # No sent2vec model - create dummy embeddings
+                print("WARNING: No sent2vec model, creating zero embeddings")
+                instance['text'] = np.zeros((len(instance['text']), 200))
+        
         self.sent_vectorized = True
 
 
@@ -128,7 +188,8 @@ class MiniBatch:
         
         if not self.sent_vectorized:
             self.vocab = vocab
-            self.max_segment_size = max_segment_size
+            # Handle None max_segment_size
+            self.max_segment_size = max_segment_size if max_segment_size is not None else 128
         else:
             self.sent_hidden_size = hidden_size
             
@@ -143,26 +204,54 @@ class MiniBatch:
             self.adjacency = adjacency
             self.num_mpath_samples = num_mpath_samples
         
-        max_len = max([len(d['text']) for d in examples])
+        # Calculate max length from examples
+        max_len = max([len(d['text']) for d in examples]) if len(examples) > 0 else 1
         max_segments = min(self.max_segments, max_len)
-        
-        if not self.sent_vectorized:
-            max_segment_size = max([len(s) for d in examples for s in d['text']]) if max_len > 0 else 1 
-            max_segment_size = min(self.max_segment_size, max_segment_size)
-            self.tokens = torch.zeros(len(examples), max_segments, max_segment_size, dtype=torch.long)
-        else:
-            self.doc_inputs = torch.zeros(len(examples), max_segments, self.sent_hidden_size)
         
         self.example_ids = []
         
         if self.annotated:
             self.labels = torch.zeros(len(examples), len(self.label_vocab))
         
+        # Initialize tensors based on vectorization mode
+        if not self.sent_vectorized:
+            # Calculate actual max segment size from data
+            actual_max_segment_size = 1
+            if len(examples) > 0 and max_len > 0:
+                for d in examples:
+                    for s in d['text']:
+                        if isinstance(s, str):
+                            actual_max_segment_size = max(actual_max_segment_size, len(s.split()))
+                        elif isinstance(s, np.ndarray):
+                            actual_max_segment_size = max(actual_max_segment_size, len(s))
+            
+            # Use the minimum of configured and actual
+            max_segment_size = min(self.max_segment_size, actual_max_segment_size)
+            self.tokens = torch.zeros(len(examples), max_segments, max_segment_size, dtype=torch.long)
+        else:
+            self.doc_inputs = torch.zeros(len(examples), max_segments, self.sent_hidden_size)
+        
+        # Process examples
         for i, instance in enumerate(examples):
             if not self.sent_vectorized:
-                for j, sent in enumerate(instance['text']):
-                    self.tokens[i, j, :len(sent)] = torch.from_numpy(np.array([self.vocab.get(w, 0) for w in sent]))
+                for j, sent in enumerate(instance['text'][:max_segments]):
+                    words = []
+                    
+                    if isinstance(sent, str):
+                        words = sent.split()
+                    elif isinstance(sent, np.ndarray):
+                        words = [str(w) for w in sent]
+                    
+                    # Truncate to max_segment_size
+                    words = words[:max_segment_size]
+                    
+                    # Get word IDs, defaulting to <UNK> (1) if not in vocab
+                    token_ids = [self.vocab.get(word, 1) for word in words]
+                    
+                    if len(token_ids) > 0:
+                        self.tokens[i, j, :len(token_ids)] = torch.tensor(token_ids, dtype=torch.long)
             else:
+                # Using sent2vec embeddings
                 self.doc_inputs[i, :len(instance['text']), :] = torch.from_numpy(instance['text'])[:max_segments]
             
             self.example_ids.append(instance['id'])
@@ -174,16 +263,18 @@ class MiniBatch:
             
             if self.has_orwell_features:
                 self.orwell_features[i] = torch.tensor(instance['orwell_features'], dtype=torch.float)
-                
+        
+        # Create mask AFTER processing all examples
         if not self.sent_vectorized:
             self.mask = (self.tokens != 0).float()
         else:
-            self.mask = (self.doc_inputs.abs().sum(dim=2) != 0).float() 
-                
+            self.mask = (self.doc_inputs.abs().sum(dim=2) != 0).float()
+        
+        # Generate metapaths if needed
         if self.sample_metapaths:
             trg_node_tokens = torch.tensor([self.node_vocab[self.type_map[x]][x] for x in self.example_ids])
             self.node_tokens, self.edge_tokens = self.generate_metapaths(trg_node_tokens, self.schemas, self.adjacency, self.edge_vocab, num_samples=self.num_mpath_samples)
-    
+            
     # Manual implementation of neighbor sampling (replaces torch_sparse.sample())
     def generate_metapaths(self, indices, schemas, adjacency, edge_vocab, num_samples=2): 
         
