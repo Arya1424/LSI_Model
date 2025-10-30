@@ -22,8 +22,7 @@ from helper import generate_vocabs, generate_graph, generate_label_weights, trai
 
 
 torch.autograd.set_detect_anomaly(True)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+
 
 # --- CONFIG LOADING ---
 with open("configs/data_path.json") as fr:
@@ -47,18 +46,35 @@ orwell_dim = hc.get('orwell_dim', 3)
 k_neighbors = hc.get('k_neighbors', 10)
 
 # --- ROBUST SENT2VEC LOADING BLOCK ---
+# --- ROBUST SENT2VEC LOADING BLOCK ---
 sent2vec_model = None
-if dc['s2v_path'] is not None:
+if dc['s2v_path'] is not None and dc['s2v_path'] != "null":
     try:
         import sent2vec
-        print(f"Loading Sent2Vec model from {dc['s2v_path']}...")
+        print(f"\n=== Loading Sent2Vec Model ===")
+        print(f"Model path: {dc['s2v_path']}")
         sent2vec_model = sent2vec.Sent2vecModel()
         sent2vec_model.load_model(dc['s2v_path'])
-        print("Sent2Vec model loaded successfully.")
+        
+        # Test the model
+        test_embed = sent2vec_model.embed_sentence("test sentence")
+        print(f"✓ Sent2Vec model loaded successfully")
+        print(f"✓ Embedding dimension: {test_embed.shape}")
+        print(f"✓ Test embedding sum: {test_embed.sum()}")
+        print("=" * 50)
     except ImportError:
-        print("!! WARNING: sent2vec library not installed. Proceeding without Sentence Embeddings (may impact F1 score).")
+        print("!! WARNING: sent2vec library not installed.")
+        print("!! Install with: pip install sent2vec")
+        sent2vec_model = None
+    except FileNotFoundError:
+        print(f"!! WARNING: Sent2Vec model file not found at {dc['s2v_path']}")
+        sent2vec_model = None
     except Exception as e:
-        print(f"!! WARNING: Could not load Sent2Vec model from disk ({e}). Proceeding without Sentence Embeddings.")
+        print(f"!! WARNING: Could not load Sent2Vec model: {e}")
+        sent2vec_model = None
+else:
+    print("!! WARNING: No sent2vec path configured (s2v_path is null)")
+    sent2vec_model = None
 # ------------------------------------
 
 
@@ -73,7 +89,14 @@ def load_or_preprocess_dataset(data_src, cache_path, sent2vec_model, use_trie, u
     print(f"Cache not found or failed. Starting full preprocessing for {data_src}...")
     dataset = LSIDataset(jsonl_file=data_src)
     dataset.preprocess(use_trie=use_trie, use_orwell=use_orwell)
-    dataset.sent_vectorize(sent2vec_model)
+    
+    # CHANGED: Don't vectorize if no sent2vec - keep as text tokens
+    if sent2vec_model is not None:
+        dataset.sent_vectorize(sent2vec_model)
+    else:
+        print("⚠ Training with word embeddings (no sent2vec)")
+        # Don't call sent_vectorize - keep text as tokens
+    
     dataset.save_data(cache_path)
     return dataset
 
@@ -84,7 +107,7 @@ def main_execution():
     print("\nPreparing PyTorch environment")
     print("==================================================")
     
-    # NEW: Print Device Status
+    # Device info
     device_info = str(DEVICE.type).upper()
     if DEVICE.type == 'cuda' and torch.cuda.device_count() > 0:
         device_name = torch.cuda.get_device_name(0)
@@ -96,15 +119,22 @@ def main_execution():
     print("\nPreparing Datasets")
     print("==================================================")
     
+    # Always load sections
     sec_dataset = load_or_preprocess_dataset(
         dc['sec_src'], dc['sec_cache'], sent2vec_model, use_trie, use_orwell
     )
+    
+    # Initialize variables to avoid UnboundLocalError
+    train_dataset = None
+    dev_dataset = None
+    test_dataset = None
+    infer_dataset = None
 
+    # Conditionally load other datasets
     if hc['do_train_dev']:
         train_dataset = load_or_preprocess_dataset(
             dc['train_src'], dc['train_cache'], sent2vec_model, use_trie, use_orwell
         )
-
         dev_dataset = load_or_preprocess_dataset(
             dc['dev_src'], dc['dev_cache'], sent2vec_model, use_trie, use_orwell
         )
@@ -118,10 +148,62 @@ def main_execution():
         infer_dataset = load_or_preprocess_dataset(
             dc['infer_src'], dc['infer_cache'], sent2vec_model, use_trie, use_orwell
         )
+    
+    # === DATA VERIFICATION ===
+    print("\n=== DATA VERIFICATION ===")
+    print(f"Sections: {len(sec_dataset)} items")
+    
+    if train_dataset is not None:
+        print(f"Train: {len(train_dataset)} items")
+        if len(train_dataset) > 0:
+            sample = train_dataset[0]
+            print(f"\nSample train item:")
+            print(f"  ID: {sample['id']}")
+            print(f"  Text type: {type(sample['text'])}")
+            if hasattr(sample['text'], 'shape'):
+                print(f"  Text shape: {sample['text'].shape}")
+            if hasattr(sample['text'], '__len__') and len(sample['text']) > 0:
+                print(f"  Number of sentences: {len(sample['text'])}")
+                first_sent = str(sample['text'][0])
+                print(f"  First sentence: {first_sent[:100]}{'...' if len(first_sent) > 100 else ''}")
+            else:
+                print(f"  WARNING: Text is EMPTY!")
+            
+            if 'labels' in sample:
+                labels = sample['labels']
+                if isinstance(labels, np.ndarray):
+                    print(f"  Labels: {labels} (count: {len(labels)})")
+                else:
+                    print(f"  Labels: {labels}")
+            else:
+                print(f"  WARNING: No labels found!")
+            
+            if 'orwell_features' in sample:
+                print(f"  Orwell features: {sample['orwell_features']}")
+    
+    if dev_dataset is not None:
+        print(f"Dev: {len(dev_dataset)} items")
+    
+    if test_dataset is not None:
+        print(f"Test: {len(test_dataset)} items")
+    
+    if infer_dataset is not None:
+        print(f"Infer: {len(infer_dataset)} items")
+    
+    print("=========================\n")
 
+    # Continue with the rest of your code...
     print("\nGathering other data")
     print("==================================================")
+    
+    # Make sure train_dataset is not None before using it
+    if train_dataset is None:
+        print("ERROR: train_dataset is None! Cannot proceed with training.")
+        return
+    
     vocab, label_vocab = generate_vocabs(train_dataset, sec_dataset, limit=hc['vocab_limit'], thresh=hc['vocab_thresh'])
+    
+    # ... rest of your code
     with open(dc['type_map']) as fr:
         type_map = json.load(fr)
     with open(dc['label_tree']) as fr:
@@ -153,7 +235,8 @@ def main_execution():
         sec_dataset, 
         batch_size=len(label_vocab), 
         collate_fn=partial(
-            collate_func, 
+            collate_func,
+            vocab=vocab,  # ADD THIS
             schemas=schemas['section'], 
             type_map=type_map, 
             node_vocab=node_vocab, 
@@ -162,10 +245,10 @@ def main_execution():
             max_segments=hc['max_segments'],
             max_segment_size=hc['max_segment_size'],
             num_mpath_samples=hc['num_mpath_samples']
-            ), 
+        ), 
         pin_memory=True, 
         num_workers=0 
-    )
+)
 
     # FIX: Explicitly retrieve sec_batch and handle StopIteration
     try:
@@ -175,13 +258,14 @@ def main_execution():
         return
 
     if hc['do_train_dev']:
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset, 
-            batch_size=hc['train_bs'], 
-            collate_fn=partial(
-                collate_func, 
-                label_vocab=label_vocab, 
-                schemas=schemas['fact'], 
+       train_loader = torch.utils.data.DataLoader(
+        train_dataset, 
+        batch_size=hc['train_bs'], 
+        collate_fn=partial(
+            collate_func,
+            vocab=vocab,  # ADD THIS
+            label_vocab=label_vocab, 
+            schemas=schemas['fact'],  
                 type_map=type_map, 
                 node_vocab=node_vocab, 
                 edge_vocab=edge_vocab, 
@@ -194,19 +278,19 @@ def main_execution():
             num_workers=0 
         )
 
-        dev_loader = torch.utils.data.DataLoader(
-            dev_dataset, 
-            batch_size=hc['dev_bs'], 
-            collate_fn=partial(
-                collate_func, 
-                label_vocab=label_vocab,  
-                max_segments=hc['max_segments'],
-                max_segment_size=hc['max_segment_size']
-                ), 
-            pin_memory=True, 
-            num_workers=0 
-        )
-
+    dev_loader = torch.utils.data.DataLoader(
+        dev_dataset, 
+        batch_size=hc['dev_bs'], 
+        collate_fn=partial(
+            collate_func,
+            vocab=vocab,  # ADD THIS
+            label_vocab=label_vocab,  
+            max_segments=hc['max_segments'],
+            max_segment_size=hc['max_segment_size']
+        ), 
+        pin_memory=True, 
+        num_workers=0 
+    )
     if hc['do_test']:
         test_loader = torch.utils.data.DataLoader(
             test_dataset, 
@@ -235,21 +319,26 @@ def main_execution():
             num_workers=0 
         )
 
+    # Around line 170 in main_execution()
     print("\nPreparing Model")
     print("==================================================")
-    
+
+    # Determine vocab size
+    vocab_size = len(vocab) if vocab is not None else None
+
     lsc_model = LeSICiN(
         hc['hidden_size'], 
         L, 
         N, 
-        E, 
+        E,
+        vocab_size=vocab_size,  # Pass vocab size
         label_weights=sec_weights, 
         lambdas=hc['lambdas'], 
         thetas=hc['thetas'], 
         pthresh=hc['pthresh'], 
         drop=hc['dropout'],
         orwell_dim=orwell_dim 
-        ).to(DEVICE)
+    ).to(DEVICE)
 
     if dc['model_load'] is not None:
         lsc_model.load_state_dict(torch.load(dc['model_load'], map_location=DEVICE))
@@ -283,23 +372,30 @@ def main_execution():
         
         for epoch in range(hc['num_epochs']):
             print(f"Starting Epoch {epoch}...")
+            
+            # Train pass - DON'T call calculate_metrics again
             train_output = train_dev_pass(lsc_model, optimizer, train_loader, sec_batch, metrics=train_mlmetrics, train=True, pred_threshold=hc['pthresh'])
-            train_mlmetrics.calculate_metrics()
+            # train_output ALREADY contains calculated metrics
             
+            # Dev pass - DON'T call calculate_metrics again
             dev_output = train_dev_pass(lsc_model, optimizer, dev_loader, sec_batch, metrics=dev_mlmetrics, pred_threshold=hc['pthresh'])
-            dev_mlmetrics.calculate_metrics()
+            # dev_output ALREADY contains calculated metrics
             
-            train_loss, dev_loss = train_mlmetrics.loss, dev_mlmetrics.loss
+            # Use the returned metrics objects
+            train_loss, dev_loss = train_output.loss, dev_output.loss
 
             if dev_loss < best_loss:
                 best_loss = dev_loss
-                best_metrics = dev_mlmetrics
+                best_metrics = dev_output
                 best_model = lsc_model.state_dict()
                 
             scheduler.step(dev_loss)
                 
-            print("%5d || %.4f | %.4f || %.4f | %.4f %.4f %.4f" % (epoch, train_loss, train_mlmetrics.macro_f1, dev_loss, dev_mlmetrics.macro_prec, dev_mlmetrics.macro_rec, dev_mlmetrics.macro_f1))
-
+            print("%5d || %.4f | %.4f || %.4f | %.4f %.4f %.4f" % (
+                epoch, 
+                train_output.loss, train_output.macro_f1, 
+                dev_output.loss, dev_output.macro_prec, dev_output.macro_rec, dev_output.macro_f1
+            ))
         print("\nCollecting outputs")
         print("==================================================")
         
