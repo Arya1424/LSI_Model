@@ -14,11 +14,18 @@ class LeSICiN(torch.nn.Module):
         self.inter_context_transform = torch.nn.Linear(hidden_size, 2 * hidden_size)
 
         if orwell_dim > 0:
-             self.orwell_projection = torch.nn.Sequential(
-                torch.nn.Linear(orwell_dim, hidden_size), 
+            self.orwell_projection = torch.nn.Sequential(
+                torch.nn.Linear(orwell_dim, hidden_size // 4),  # CHANGED: Project to smaller dim
                 torch.nn.ReLU(),
-                torch.nn.Dropout(drop)
+                torch.nn.Dropout(drop),
+                torch.nn.Linear(hidden_size // 4, hidden_size),  # ADDED: Second layer
+                torch.nn.Tanh()  # ADDED: Bound output to [-1, 1]
             )
+            self.orwell_scale = torch.nn.Parameter(torch.tensor(0.1))  # Learnable scale factor
+        
+        # Layer normalization
+        self.fact_norm = torch.nn.LayerNorm(hidden_size)
+        self.sec_norm = torch.nn.LayerNorm(hidden_size)
         
         self.criterion = torch.nn.BCEWithLogitsLoss(pos_weight=label_weights)
         
@@ -42,6 +49,25 @@ class LeSICiN(torch.nn.Module):
             fact_attr_hidden = self.text_encoder(tokens=fact_batch.tokens, mask=fact_batch.mask)
         else:
             fact_attr_hidden = self.text_encoder(doc_inputs=fact_batch.doc_inputs, mask=fact_batch.mask)
+
+        if hasattr(fact_batch, 'has_orwell_features') and fact_batch.has_orwell_features:
+            # Normalize to unit norm
+            orwell_normalized = torch.nn.functional.normalize(fact_batch.orwell_features, p=2, dim=1)
+            orwell_proj = self.orwell_projection(orwell_normalized)
+            # CHANGED: Scale down and add (instead of direct addition)
+            fact_attr_hidden = fact_attr_hidden + self.orwell_scale * orwell_proj
+        
+        # Normalize AFTER adding Orwell features
+        fact_attr_hidden = self.fact_norm(fact_attr_hidden)
+        
+        if not sec_batch.sent_vectorized:
+            sec_attr_hidden = self.text_encoder(tokens=sec_batch.tokens, mask=sec_batch.mask)
+        else:
+            sec_attr_hidden = self.text_encoder(doc_inputs=sec_batch.doc_inputs, mask=sec_batch.mask)
+        
+        sec_attr_hidden = self.sec_norm(sec_attr_hidden)
+        
+        # ... rest of code stays the same
 
         if hasattr(fact_batch, 'has_orwell_features') and fact_batch.has_orwell_features:
             orwell_proj = self.orwell_projection(fact_batch.orwell_features)
