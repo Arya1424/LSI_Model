@@ -11,7 +11,7 @@
 	"test_cache": "cache/test.pkl",
 	"infer_cache": "cache/infer.pkl",
 	
-	"s2v_path": null,
+	"s2v_path": "null",
 	"type_map": "data/type_map.json",
 	"label_tree": "data/label_tree.json",
 	"citation_network": "data/citation_network.json",
