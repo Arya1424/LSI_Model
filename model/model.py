@@ -10,6 +10,8 @@ class LeSICiN(torch.nn.Module):
         self.pthresh = pthresh
         self.lambdas = lambdas
         self.thetas = thetas
+        self.hidden_size = hidden_size
+        self.use_orwell = orwell_dim > 0
         
         # Text attribute encoder
         self.attr_encoder = HierAttnNet(hidden_size, vocab_size=vocab_size, drop=drop)
@@ -21,52 +23,77 @@ class LeSICiN(torch.nn.Module):
         self.match_net = MatchNet(hidden_size, num_labels, drop=drop)
         
         # Orwell features integration (if used)
-        if orwell_dim > 0:
+        if self.use_orwell:
             self.orwell_fc = torch.nn.Linear(orwell_dim, hidden_size)
+            torch.nn.init.xavier_uniform_(self.orwell_fc.weight)
+            torch.nn.init.zeros_(self.orwell_fc.bias)
         
         # Loss function
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction='none')
-        self.label_weights = label_weights
+        
+        # Register label weights as buffer (moves with model to GPU)
+        if label_weights is not None:
+            self.register_buffer('label_weights', label_weights)
+        else:
+            self.label_weights = None
         
     def forward(self, fact_batch, sec_batch, pthresh=None):
-        # 1. Encode fact text attributes
-        if hasattr(fact_batch, 'tokens'):
+        # === 1. ENCODE FACT TEXT ATTRIBUTES ===
+        if hasattr(fact_batch, 'tokens') and fact_batch.tokens is not None:
             fact_attr_hidden = self.attr_encoder(
                 tokens=fact_batch.tokens, 
                 mask=fact_batch.mask
             )
-        else:
+        elif hasattr(fact_batch, 'doc_inputs'):
             fact_attr_hidden = self.attr_encoder(
                 doc_inputs=fact_batch.doc_inputs,
                 mask=fact_batch.mask
             )
+        else:
+            raise ValueError("fact_batch must have either 'tokens' or 'doc_inputs'")
         
-        # 2. Encode section structure
+        # === 2. INTEGRATE ORWELL FEATURES (if enabled) ===
+        if self.use_orwell and hasattr(fact_batch, 'orwell_features'):
+            orwell_hidden = torch.tanh(self.orwell_fc(fact_batch.orwell_features))
+            # Combine with text embeddings (weighted sum)
+            fact_attr_hidden = self.lambdas[0] * fact_attr_hidden + self.lambdas[1] * orwell_hidden
+        
+        # === 3. ENCODE SECTION GRAPH STRUCTURE ===
         sec_struct_hidden = self.graph_encoder(
             sec_batch.node_tokens,
             sec_batch.edge_tokens,
-            sec_batch.schemas
+            sec_batch.schemas,
+            inter_context=fact_attr_hidden  # ✅ ADDED: Use fact embeddings as context
         )
         
-        # 3. Match facts to sections
-        logits, predictions = self.match_net(fact_attr_hidden, sec_struct_hidden)
+        # === 4. MATCH FACTS TO SECTIONS ===
+        logits, scores = self.match_net(
+            fact_attr_hidden, 
+            sec_struct_hidden,
+            context=fact_attr_hidden  # ✅ ADDED: Use fact embeddings for attention
+        )
         
-        # 4. Apply threshold
-        if pthresh is not None:
-            predictions = (torch.sigmoid(logits) > pthresh).float()
+        # === 5. APPLY THRESHOLD FOR PREDICTIONS ===
+        # Use provided threshold, or fall back to self.pthresh, or use 0.5 as last resort
+        threshold = pthresh if pthresh is not None else (self.pthresh if self.pthresh is not None else 0.5)
+        predictions = (torch.sigmoid(logits) > threshold).float()
         
-        # 5. Calculate loss
-        if fact_batch.annotated:
+        # === 6. CALCULATE LOSS (if labels available) ===
+        loss = None
+        if fact_batch.annotated and hasattr(fact_batch, 'labels'):
+            # Binary cross-entropy with logits
             loss_matrix = self.criterion(logits, fact_batch.labels)
+            
+            # Apply label weights (to handle class imbalance)
             if self.label_weights is not None:
                 loss_matrix = loss_matrix * self.label_weights.unsqueeze(0)
+            
+            # Average loss across all predictions
             loss = loss_matrix.mean()
-        else:
-            loss = None
         
         return loss, predictions, sec_struct_hidden, fact_attr_hidden
     
-    
+
 class HierAttnNet(torch.nn.Module):
     def __init__(self, hidden_size, vocab_size=None, drop=0.1):
         super().__init__()
