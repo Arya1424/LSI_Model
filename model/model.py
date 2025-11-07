@@ -1,6 +1,72 @@
 import torch
 from model.basicmodules import LstmNet, AttnNet
 
+class LeSICiN(torch.nn.Module):
+    def __init__(self, hidden_size, num_labels, num_nodes, num_edges, vocab_size=None, 
+                 label_weights=None, lambdas=[0.5, 0.5], thetas=[1, 0, 3], 
+                 pthresh=0.4, drop=0.2, orwell_dim=3):
+        super().__init__()
+        
+        self.pthresh = pthresh
+        self.lambdas = lambdas
+        self.thetas = thetas
+        
+        # Text attribute encoder
+        self.attr_encoder = HierAttnNet(hidden_size, vocab_size=vocab_size, drop=drop)
+        
+        # Graph structure encoder
+        self.graph_encoder = MetapathAggrNet(num_nodes, num_edges, hidden_size, drop=drop)
+        
+        # Matching/scoring network
+        self.match_net = MatchNet(hidden_size, num_labels, drop=drop)
+        
+        # Orwell features integration (if used)
+        if orwell_dim > 0:
+            self.orwell_fc = torch.nn.Linear(orwell_dim, hidden_size)
+        
+        # Loss function
+        self.criterion = torch.nn.BCEWithLogitsLoss(reduction='none')
+        self.label_weights = label_weights
+        
+    def forward(self, fact_batch, sec_batch, pthresh=None):
+        # 1. Encode fact text attributes
+        if hasattr(fact_batch, 'tokens'):
+            fact_attr_hidden = self.attr_encoder(
+                tokens=fact_batch.tokens, 
+                mask=fact_batch.mask
+            )
+        else:
+            fact_attr_hidden = self.attr_encoder(
+                doc_inputs=fact_batch.doc_inputs,
+                mask=fact_batch.mask
+            )
+        
+        # 2. Encode section structure
+        sec_struct_hidden = self.graph_encoder(
+            sec_batch.node_tokens,
+            sec_batch.edge_tokens,
+            sec_batch.schemas
+        )
+        
+        # 3. Match facts to sections
+        logits, predictions = self.match_net(fact_attr_hidden, sec_struct_hidden)
+        
+        # 4. Apply threshold
+        if pthresh is not None:
+            predictions = (torch.sigmoid(logits) > pthresh).float()
+        
+        # 5. Calculate loss
+        if fact_batch.annotated:
+            loss_matrix = self.criterion(logits, fact_batch.labels)
+            if self.label_weights is not None:
+                loss_matrix = loss_matrix * self.label_weights.unsqueeze(0)
+            loss = loss_matrix.mean()
+        else:
+            loss = None
+        
+        return loss, predictions, sec_struct_hidden, fact_attr_hidden
+    
+    
 class HierAttnNet(torch.nn.Module):
     def __init__(self, hidden_size, vocab_size=None, drop=0.1):
         super().__init__()

@@ -25,7 +25,7 @@
     "sch_factor": 0.5,       
     "sch_patience": 5,       
     "num_epochs": 50,       
-    "pthresh": 0.40,         
+    "pthresh": 0.30,         
     "thetas": [1, 0, 3],
     "lambdas": [0.5, 0.5],
     "dropout": 0.2          

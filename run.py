@@ -293,17 +293,18 @@ def main_execution():
     )
     if hc['do_test']:
         test_loader = torch.utils.data.DataLoader(
-            test_dataset, 
-            batch_size=hc['test_bs'], 
-            collate_fn=partial(
-                collate_func, 
-                label_vocab=label_vocab,  
-                max_segments=hc['max_segments'],
-                max_segment_size=hc['max_segment_size']
-                ), 
-            pin_memory=True, 
-            num_workers=0 
-        )
+        test_dataset, 
+        batch_size=hc['test_bs'], 
+        collate_fn=partial(
+            collate_func, 
+            vocab=vocab,  # ✅ ADDED THIS
+            label_vocab=label_vocab,  
+            max_segments=hc['max_segments'],
+            max_segment_size=hc['max_segment_size']
+        ), 
+        pin_memory=True, 
+        num_workers=0 
+    )
 
     if hc['do_infer']:
         infer_loader = torch.utils.data.DataLoader(
@@ -423,7 +424,7 @@ def main_execution():
         print("\nRunning Test")
         print("==================================================")
         test_output = train_dev_pass(lsc_model, optimizer, test_loader, sec_batch, metrics=test_mlmetrics, pred_threshold=hc['pthresh'])
-        test_mlmetrics.calculate_metrics()
+        # Don't call calculate_metrics() - it's already called in train_dev_pass    
         
         with open(dc['test_metrics_dump'], 'wb') as fw:
             pkl.dump(test_mlmetrics, fw)
