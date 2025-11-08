@@ -2,6 +2,10 @@ import torch
 from model.basicmodules import LstmNet, AttnNet
 
 class LeSICiN(torch.nn.Module):
+    """
+    Legal Statute Identification with Complementary Networks (LeSICiN)
+    """
+    
     def __init__(self, hidden_size, num_labels, num_nodes, num_edges, vocab_size=None, 
                  label_weights=None, lambdas=[0.5, 0.5], thetas=[1, 0, 3], 
                  pthresh=0.4, drop=0.2, orwell_dim=3):
@@ -31,11 +35,62 @@ class LeSICiN(torch.nn.Module):
         # Loss function
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction='none')
         
-        # Register label weights as buffer (moves with model to GPU)
+        # Register label weights as buffer
         if label_weights is not None:
             self.register_buffer('label_weights', label_weights)
         else:
             self.label_weights = None
+        
+    def forward(self, fact_batch, sec_batch, pthresh=None):
+        """Forward pass through the model"""
+        
+        # === 1. ENCODE FACT TEXT ATTRIBUTES ===
+        if hasattr(fact_batch, 'tokens') and fact_batch.tokens is not None:
+            fact_attr_hidden = self.attr_encoder(
+                tokens=fact_batch.tokens, 
+                mask=fact_batch.mask
+            )
+        elif hasattr(fact_batch, 'doc_inputs'):
+            fact_attr_hidden = self.attr_encoder(
+                doc_inputs=fact_batch.doc_inputs,
+                mask=fact_batch.mask
+            )
+        else:
+            raise ValueError("fact_batch must have either 'tokens' or 'doc_inputs'")
+        
+        # === 2. INTEGRATE ORWELL FEATURES (if enabled) ===
+        if self.use_orwell and hasattr(fact_batch, 'orwell_features'):
+            orwell_hidden = torch.tanh(self.orwell_fc(fact_batch.orwell_features))
+            fact_attr_hidden = self.lambdas[0] * fact_attr_hidden + self.lambdas[1] * orwell_hidden
+        
+        # === 3. ENCODE SECTION GRAPH STRUCTURE ===
+        # Note: Don't pass inter_context - sections (100) and facts (16) have different batch sizes
+        sec_struct_hidden = self.graph_encoder(
+            sec_batch.node_tokens,
+            sec_batch.edge_tokens,
+            sec_batch.schemas
+        )
+        
+        # === 4. MATCH FACTS TO SECTIONS ===
+        logits, scores = self.match_net(
+            fact_attr_hidden, 
+            sec_struct_hidden,
+            context=fact_attr_hidden
+        )
+        
+        # === 5. APPLY THRESHOLD FOR PREDICTIONS ===
+        threshold = pthresh if pthresh is not None else (self.pthresh if self.pthresh is not None else 0.5)
+        predictions = (torch.sigmoid(logits) > threshold).float()
+        
+        # === 6. CALCULATE LOSS (if labels available) ===
+        loss = None
+        if fact_batch.annotated and hasattr(fact_batch, 'labels'):
+            loss_matrix = self.criterion(logits, fact_batch.labels)
+            if self.label_weights is not None:
+                loss_matrix = loss_matrix * self.label_weights.unsqueeze(0)
+            loss = loss_matrix.mean()
+        
+        return loss, predictions, sec_struct_hidden, fact_attr_hidden
         
     def forward(self, fact_batch, sec_batch, pthresh=None):
         # === 1. ENCODE FACT TEXT ATTRIBUTES ===
