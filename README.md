@@ -105,7 +105,7 @@ The pipeline integrates textual, structural, and linguistic signals:
 
 ---
 
-## 📂 Repository Structure (recommended)
+## 📂 Repository Structure
 
 ```
 configs/
