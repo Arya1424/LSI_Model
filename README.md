@@ -158,9 +158,9 @@ python run.py
 
 ## 🤝 Contributors
 
+* **Aryasree M**
+* **Daksha P Jain**
 * **Shristi Bose**
 * **Jahnavi Raja**
-* **Daksha P Jain**
-* **Aryasree M**
 
 ---
