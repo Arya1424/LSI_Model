@@ -12,7 +12,7 @@ This repository contains an improved framework for **Legal Statute Identificatio
 2. **Orwellian Linguistic Clarity Features**
 3. **KD-Tree Accelerated Statute Retrieval**
 
-The model achieves a **Test Macro-F1 of 39.79%**, a *~39.86% relative improvement* over the widely-used LeSICiN baseline (28.45%), while reducing inference time by **6.7×**.
+The model achieves a **Test Macro-F1 of 39.79%**, a *~11.34% relative improvement* over the widely-used LeSICiN baseline (28.45%), while reducing inference time by **6.7×**.
 
 ---
 
